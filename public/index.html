@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Item Matcher - Alat Kesehatan</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="app-shell">
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark">IM</span>
+      <div>
+        <h1>Item Matcher</h1>
+        <p>Cocokkan daftar kebutuhan client dengan master barang company</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <a href="pricing.html">Pricing</a>
+      <button id="btn-theme-toggle" class="theme-toggle" type="button" aria-label="Ganti mode terang/gelap" title="Ganti mode terang/gelap">🌙</button>
+    </div>
+  </header>
+
+  <p id="license-banner" class="license-banner" style="display:none"></p>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="master">Master Barang</button>
+    <button class="tab-btn" data-tab="match">Cocokkan List Client</button>
+  </nav>
+
+  <main>
+    <section id="tab-master" class="tab-panel active">
+      <div class="card">
+        <h2 id="form-heading">Tambah Item</h2>
+        <form id="form-add-item" class="item-form" enctype="multipart/form-data">
+          <input type="hidden" id="input-edit-id" value="" />
+          <div class="field-grid">
+            <div class="field">
+              <label for="input-namaItem">Nama item</label>
+              <input type="text" id="input-namaItem" placeholder="mis. HARTMANN EAR FORCEP 12 CM" required />
+            </div>
+            <div class="field">
+              <label for="input-tipe">Tipe</label>
+              <input type="text" id="input-tipe" placeholder="mis. 277-03" />
+            </div>
+            <div class="field">
+              <label for="input-merk">Merk</label>
+              <input type="text" id="input-merk" placeholder="mis. Fimed" />
+            </div>
+            <div class="field">
+              <label for="input-gambar-file">Gambar</label>
+              <input type="file" id="input-gambar-file" accept="image/png,image/jpeg,image/webp,image/gif" />
+            </div>
+            <div class="field">
+              <label for="input-link">Link INAPROC</label>
+              <input type="text" id="input-link" placeholder="https://katalog.inaproc.id/..." />
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary" id="btn-submit-item">Tambah</button>
+            <button type="button" class="btn btn-ghost" id="btn-cancel-edit" style="display:none">Batal</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Import Massal</h2>
+        <form id="form-import" class="import-form">
+          <label class="field">
+            <span>File Excel / CSV / PDF (kolom: nama item, tipe, merk, gambar/link)</span>
+            <input type="file" id="input-import-file" accept=".xlsx,.xls,.csv,.pdf" />
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" id="input-auto-fetch-image" checked />
+            <span>Ambil gambar otomatis dari kolom LINK (produk INAPROC)</span>
+          </label>
+          <button type="submit" class="btn btn-secondary" id="btn-submit-import">Import</button>
+        </form>
+        <p id="import-status" class="status"></p>
+      </div>
+
+      <div class="card">
+        <div class="table-toolbar">
+          <h2>Daftar Master Barang <span id="item-count" class="count-badge"></span></h2>
+          <div class="toolbar-actions">
+            <button id="btn-delete-selected" class="btn btn-danger-outline" disabled>Hapus Terpilih (<span id="selected-count">0</span>)</button>
+            <button id="btn-delete-all" class="btn btn-danger">Hapus Semua Data</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="table-items">
+            <thead>
+              <tr>
+                <th class="col-checkbox"><input type="checkbox" id="checkbox-select-all" /></th>
+                <th class="col-image">Gambar</th>
+                <th>Nama Item</th>
+                <th>Tipe</th>
+                <th>Merk</th>
+                <th>Link</th>
+                <th class="col-actions"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <p id="empty-state" class="empty-state" style="display:none">Belum ada data master barang. Tambah manual atau import dari Excel/CSV/PDF di atas.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-match" class="tab-panel">
+      <div class="card">
+        <h2>Upload List Client</h2>
+        <form id="form-upload-client" class="import-form">
+          <label class="field">
+            <span>File Excel / CSV berisi daftar kebutuhan client</span>
+            <input type="file" id="input-client-file" accept=".xlsx,.xls,.csv" required />
+          </label>
+          <button type="submit" class="btn btn-secondary">Upload &amp; Preview</button>
+        </form>
+      </div>
+
+      <div id="preview-area" class="card" style="display:none">
+        <h2>Pilih Kolom</h2>
+        <div class="field-grid">
+          <div class="field">
+            <label for="select-column">Kolom berisi nama barang</label>
+            <select id="select-column"></select>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button id="btn-run-match" class="btn btn-primary">Jalankan Pencocokan</button>
+        </div>
+      </div>
+
+      <div id="match-results" class="card" style="display:none">
+        <h2>Hasil Pencocokan</h2>
+        <div class="table-wrap">
+          <table id="table-results">
+            <thead>
+              <tr><th>Item Client</th><th>Suggestion</th><th>Skor</th><th>Status</th><th class="col-actions"></th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="form-actions">
+          <button id="btn-export" class="btn btn-success">Export Hasil ke Excel</button>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="lightbox" class="lightbox" style="display:none">
+  <button id="lightbox-close" class="lightbox-close" aria-label="Tutup">&times;</button>
+  <img id="lightbox-img" src="" alt="" />
+</div>
+
+<div id="license-lock" class="license-lock" style="display:none">
+  <div class="license-lock-box">
+    <h2>Lisensi Tidak Aktif</h2>
+    <p id="license-lock-message">Lisensi penggunaan tool ini sudah tidak aktif atau kadaluarsa. Silakan hubungi vendor untuk memperpanjang langganan.</p>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

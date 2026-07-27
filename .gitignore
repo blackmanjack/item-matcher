@@ -1,0 +1,7 @@
+node_modules/
+data/master-items.json
+data/license.txt
+public/uploads/*
+!public/uploads/.gitkeep
+.env
+.claude/

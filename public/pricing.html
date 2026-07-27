@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Pricing - Item Matcher</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="app-shell">
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark">IM</span>
+      <div>
+        <h1>Item Matcher</h1>
+        <p>Paket berlangganan hosting &amp; maintenance</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <a href="index.html">Buka Tool</a>
+      <button id="btn-theme-toggle" class="theme-toggle" type="button" aria-label="Ganti mode terang/gelap" title="Ganti mode terang/gelap">🌙</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="card pricing-hero">
+      <h2>Subscription Berbasis Hosting &amp; Maintenance</h2>
+      <p>Tiap perusahaan mendapat instance Item Matcher sendiri (data terpisah, tidak dicampur dengan klien lain). Kami yang kelola hosting, backup, dan dukungan teknis selama masa berlangganan aktif.</p>
+    </div>
+
+    <div class="pricing-grid">
+      <div class="card price-card">
+        <div class="price-tier">Basic</div>
+        <div class="price-amount">Rp 500rb <span>&ndash;</span> 1 juta<span class="price-period">/bulan</span></div>
+        <ul class="price-features">
+          <li>Hosting instance (VPS kecil/shared)</li>
+          <li>Backup data mingguan otomatis</li>
+          <li>Bugfix bila ada error</li>
+        </ul>
+        <a href="#kontak" class="btn btn-ghost price-cta">Hubungi Kami</a>
+      </div>
+
+      <div class="card price-card featured">
+        <div class="price-badge">Paling Populer</div>
+        <div class="price-tier">Standard</div>
+        <div class="price-amount">Rp 1.5 <span>&ndash;</span> 2.5 juta<span class="price-period">/bulan</span></div>
+        <ul class="price-features">
+          <li>Semua fitur Basic</li>
+          <li>Update fitur minor (kolom baru, kamus sinonim sesuai istilah perusahaan)</li>
+          <li>Respon support &lt; 2 hari kerja</li>
+        </ul>
+        <a href="#kontak" class="btn btn-primary price-cta">Hubungi Kami</a>
+      </div>
+
+      <div class="card price-card">
+        <div class="price-tier">Premium</div>
+        <div class="price-amount">Rp 3 <span>&ndash;</span> 5 juta<span class="price-period">/bulan</span></div>
+        <ul class="price-features">
+          <li>Semua fitur Standard</li>
+          <li>Fitur custom on-request</li>
+          <li>Prioritas support &lt; 1 hari kerja</li>
+          <li>Laporan pemakaian bulanan</li>
+        </ul>
+        <a href="#kontak" class="btn btn-ghost price-cta">Hubungi Kami</a>
+      </div>
+    </div>
+
+    <div class="card setup-fee-note">
+      <h3>Biaya Setup Awal: Rp 5&ndash;10 juta <span class="setup-fee-badge">Sekali bayar, di luar biaya bulanan</span></h3>
+      <p>Mencakup instalasi awal, migrasi master data barang perusahaan ke sistem, dan training pemakaian untuk tim admin/procurement.</p>
+    </div>
+
+    <div class="card" id="kontak">
+      <h2>Tertarik Berlangganan?</h2>
+      <p>Hubungi kami untuk demo dan penyesuaian paket sesuai kebutuhan perusahaan Anda.</p>
+    </div>
+  </main>
+</div>
+
+<script>
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    document.getElementById('btn-theme-toggle').textContent = theme === 'dark' ? '☀️' : '🌙';
+  }
+  const savedTheme = localStorage.getItem('theme');
+  if (savedTheme === 'dark' || savedTheme === 'light') {
+    applyTheme(savedTheme);
+  } else {
+    applyTheme(window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  }
+  document.getElementById('btn-theme-toggle').addEventListener('click', () => {
+    const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+    const next = current === 'dark' ? 'light' : 'dark';
+    localStorage.setItem('theme', next);
+    applyTheme(next);
+  });
+</script>
+</body>
+</html>
