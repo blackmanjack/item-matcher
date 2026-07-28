@@ -282,15 +282,21 @@ app.get('/api/import-progress/:jobId', async (req, res, next) => {
     const gambarGagal = [];
 
     await runWithConcurrency(batch, Math.min(INAPROC_CONCURRENCY, batch.length), async (item) => {
-      const result = await fetchProductImage(item.link);
-      if (result) {
-        const uploaded = await uploadImageToBlob(result.buffer, result.ext, result.mimetype);
-        await db.saveItemFetchResult(item.id, uploaded);
-        gambarBerhasil++;
-      } else {
-        await db.saveItemFetchResult(item.id, null);
-        gambarGagal.push({ namaItem: item.namaItem, alasan: 'Gambar tidak ditemukan / link tidak bisa diakses' });
+      try {
+        const result = await fetchProductImage(item.link);
+        if (result) {
+          const uploaded = await uploadImageToBlob(result.buffer, result.ext, result.mimetype);
+          await db.saveItemFetchResult(item.id, uploaded);
+          gambarBerhasil++;
+          return;
+        }
+      } catch (err) {
+        // Kegagalan upload ke Blob (mis. token belum diatur) tidak boleh menggagalkan
+        // seluruh batch - dicatat sebagai gagal per-item, log detail untuk debugging.
+        console.error(`[import] gagal proses item id=${item.id} (${item.namaItem}):`, err?.message);
       }
+      await db.saveItemFetchResult(item.id, null);
+      gambarGagal.push({ namaItem: item.namaItem, alasan: 'Gambar tidak ditemukan / link tidak bisa diakses' });
     });
 
     const status = await db.advanceImportJob(jobId, { batchDone: batch.length, gambarBerhasil, gambarGagal });
