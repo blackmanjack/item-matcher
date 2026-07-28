@@ -6,36 +6,26 @@ const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
 const multer = require('multer');
-const sharp = require('sharp');
-const low = require('lowdb');
-const FileSync = require('lowdb/adapters/FileSync');
 
 const { findMatches } = require('./lib/matcher');
 const { readExcelBuffer, readCsvBuffer, writeExcelBuffer } = require('./lib/excel');
 const { parsePdfBuffer } = require('./lib/pdfParser');
 const { fetchProductImage, runWithConcurrency, IMAGE_MIME_TO_EXT } = require('./lib/inaprocImage');
 const { verifyLicense } = require('./lib/license');
-
-const DATA_DIR = path.join(__dirname, 'data');
-const UPLOADS_DIR = path.join(__dirname, 'public', 'uploads');
-fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-
-const DB_PATH = path.join(DATA_DIR, 'master-items.json');
-const adapter = new FileSync(DB_PATH);
-const db = low(adapter);
-db.defaults({ items: [], nextId: 1 }).write();
+const { uploadImageToBlob, deleteImageFromBlob } = require('./lib/blobStorage');
+const db = require('./lib/db');
 
 // ---------- Lisensi ----------
 // LICENSE_SECRET hanya diketahui vendor (kamu), dipakai untuk verifikasi tanda tangan
-// kode lisensi. Kode lisensi klien sendiri diisi manual oleh admin di server mereka,
-// lewat env var LICENSE_KEY atau file data/license.txt.
+// kode lisensi. Kode lisensi klien sendiri diisi lewat env var LICENSE_KEY (di Vercel:
+// Project Settings > Environment Variables), atau file data/license.txt untuk deploy
+// non-serverless yang punya disk persisten.
 //
 // Set LICENSE_ENFORCED=false di .env untuk menonaktifkan sementara pengecekan lisensi
 // (mis. saat masih development/demo) - tinggal hapus/ubah lagi ke true untuk aktifkan.
 const LICENSE_ENFORCED = process.env.LICENSE_ENFORCED !== 'false';
 const LICENSE_SECRET = process.env.LICENSE_SECRET || '';
-const LICENSE_FILE = path.join(DATA_DIR, 'license.txt');
+const LICENSE_FILE = path.join(__dirname, 'data', 'license.txt');
 
 function readLicenseKey() {
   if (process.env.LICENSE_KEY) return process.env.LICENSE_KEY.trim();
@@ -97,16 +87,10 @@ const docUpload = multer({
   fileFilter: docFileFilter,
 });
 
+// memoryStorage (bukan diskStorage) - filesystem Vercel read-only, buffer di-upload
+// langsung ke Vercel Blob dari route handler.
 const imageUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-    filename: (req, file, cb) => {
-      // Nama file selalu di-generate ulang (bukan dari input user) untuk
-      // mencegah path traversal / penimpaan file yang tidak diinginkan.
-      const ext = IMAGE_MIME_TO_EXT[file.mimetype] || '.bin';
-      cb(null, `${crypto.randomUUID()}${ext}`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
   fileFilter: (req, file, cb) => {
     if (!IMAGE_MIME_TO_EXT[file.mimetype]) {
@@ -115,53 +99,6 @@ const imageUpload = multer({
     cb(null, true);
   },
 });
-
-function deleteUploadedImage(gambarPath) {
-  if (!gambarPath || !gambarPath.startsWith('/uploads/')) return;
-  const filename = path.basename(gambarPath);
-  const fullPath = path.join(UPLOADS_DIR, filename);
-  fs.unlink(fullPath, () => {}); // best-effort, abaikan error kalau file tidak ada
-}
-
-const THUMB_MAX_SIZE = 200;
-const THUMB_QUALITY = 75;
-
-// Generate thumbnail webp kecil dari gambar sumber (buffer atau path di disk).
-// Return path relatif "/uploads/xxx_thumb.webp", atau null kalau gagal (list akan
-// fallback ke gambar asli di frontend).
-async function generateThumbnail(source, baseFilename) {
-  try {
-    const thumbFilename = `${baseFilename}_thumb.webp`;
-    await sharp(source)
-      .resize({ width: THUMB_MAX_SIZE, height: THUMB_MAX_SIZE, fit: 'inside', withoutEnlargement: true })
-      .webp({ quality: THUMB_QUALITY })
-      .toFile(path.join(UPLOADS_DIR, thumbFilename));
-    return `/uploads/${thumbFilename}`;
-  } catch {
-    return null;
-  }
-}
-
-// Resolve path gambar relatif ("/uploads/xxx.ext") -> path absolut di disk, khusus
-// untuk dibaca (export Excel). basename() mencegah path traversal, sama seperti
-// deleteUploadedImage di atas.
-function resolveUploadedImagePath(gambarPath) {
-  if (!gambarPath || !gambarPath.startsWith('/uploads/')) return undefined;
-  const filename = path.basename(gambarPath);
-  const fullPath = path.join(UPLOADS_DIR, filename);
-  return fs.existsSync(fullPath) ? fullPath : undefined;
-}
-
-// Simpan buffer gambar ke public/uploads dengan nama acak (dipakai untuk hasil
-// auto-fetch dari link INAPROC), sekaligus generate thumbnail kecil untuk tampilan
-// list -> return { gambar, gambarThumb } (path relatif).
-async function saveImageBuffer(buffer, ext) {
-  const id = crypto.randomUUID();
-  const filename = `${id}${ext}`;
-  fs.writeFileSync(path.join(UPLOADS_DIR, filename), buffer);
-  const gambarThumb = await generateThumbnail(buffer, id);
-  return { gambar: `/uploads/${filename}`, gambarThumb: gambarThumb || `/uploads/${filename}` };
-}
 
 function sanitizeField(value) {
   return String(value || '').trim().slice(0, MAX_TEXT_LEN);
@@ -178,9 +115,6 @@ async function readTabularBuffer(buffer, originalname) {
 const app = express();
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
-// Nama file di /uploads selalu UUID unik per gambar (tidak pernah dipakai ulang
-// untuk konten berbeda) - aman di-cache selamanya oleh browser.
-app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '1y', immutable: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Endpoint status lisensi harus terdaftar SEBELUM middleware requireLicense supaya
@@ -193,34 +127,38 @@ app.use('/api', requireLicense);
 
 // ---------- Master item CRUD ----------
 
-app.get('/api/items', (req, res) => {
-  res.json(db.get('items').value());
+app.get('/api/items', async (req, res, next) => {
+  try {
+    res.json(await db.getAllItems());
+  } catch (err) {
+    next(err);
+  }
 });
 
 app.post('/api/items', imageUpload.single('gambarFile'), async (req, res, next) => {
   try {
     const namaItem = sanitizeField(req.body?.namaItem);
     if (!namaItem) {
-      if (req.file) deleteUploadedImage(`/uploads/${req.file.filename}`);
       return res.status(400).json({ error: 'namaItem wajib diisi' });
     }
 
-    const id = db.get('nextId').value();
+    let gambar = '';
     let gambarThumb = '';
     if (req.file) {
-      gambarThumb = (await generateThumbnail(req.file.path, path.parse(req.file.filename).name)) || '';
+      const ext = IMAGE_MIME_TO_EXT[req.file.mimetype];
+      const uploaded = await uploadImageToBlob(req.file.buffer, ext, req.file.mimetype);
+      gambar = uploaded.gambar;
+      gambarThumb = uploaded.gambarThumb;
     }
-    const item = {
-      id,
+
+    const item = await db.insertItem({
       namaItem,
       tipe: sanitizeField(req.body?.tipe),
       merk: sanitizeField(req.body?.merk),
       link: sanitizeField(req.body?.link),
-      gambar: req.file ? `/uploads/${req.file.filename}` : '',
-      gambarThumb: gambarThumb || (req.file ? `/uploads/${req.file.filename}` : ''),
-    };
-    db.get('items').push(item).write();
-    db.set('nextId', id + 1).write();
+      gambar,
+      gambarThumb,
+    });
     res.status(201).json(item);
   } catch (err) {
     next(err);
@@ -230,15 +168,13 @@ app.post('/api/items', imageUpload.single('gambarFile'), async (req, res, next) 
 app.put('/api/items/:id', imageUpload.single('gambarFile'), async (req, res, next) => {
   try {
     const id = Number(req.params.id);
-    const existing = db.get('items').find({ id }).value();
+    const existing = await db.getItem(id);
     if (!existing) {
-      if (req.file) deleteUploadedImage(`/uploads/${req.file.filename}`);
       return res.status(404).json({ error: 'Item tidak ditemukan' });
     }
 
     const namaItem = sanitizeField(req.body?.namaItem);
     if (!namaItem) {
-      if (req.file) deleteUploadedImage(`/uploads/${req.file.filename}`);
       return res.status(400).json({ error: 'namaItem wajib diisi' });
     }
 
@@ -250,58 +186,64 @@ app.put('/api/items/:id', imageUpload.single('gambarFile'), async (req, res, nex
     };
 
     if (req.file) {
-      deleteUploadedImage(existing.gambar);
-      deleteUploadedImage(existing.gambarThumb);
-      const gambarThumb = await generateThumbnail(req.file.path, path.parse(req.file.filename).name);
-      updates.gambar = `/uploads/${req.file.filename}`;
-      updates.gambarThumb = gambarThumb || updates.gambar;
+      const ext = IMAGE_MIME_TO_EXT[req.file.mimetype];
+      const uploaded = await uploadImageToBlob(req.file.buffer, ext, req.file.mimetype);
+      updates.gambar = uploaded.gambar;
+      updates.gambarThumb = uploaded.gambarThumb;
+      await deleteImageFromBlob(existing.gambar);
+      await deleteImageFromBlob(existing.gambarThumb);
     }
 
-    db.get('items').find({ id }).assign(updates).write();
-    res.json(db.get('items').find({ id }).value());
+    const updated = await db.updateItem(id, updates);
+    res.json(updated);
   } catch (err) {
     next(err);
   }
 });
 
-app.delete('/api/items/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const existing = db.get('items').find({ id }).value();
-  if (existing) {
-    deleteUploadedImage(existing.gambar);
-    deleteUploadedImage(existing.gambarThumb);
+app.delete('/api/items/:id', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const deleted = await db.deleteItem(id);
+    if (deleted) {
+      await deleteImageFromBlob(deleted.gambar);
+      await deleteImageFromBlob(deleted.gambarThumb);
+    }
+    res.status(204).end();
+  } catch (err) {
+    next(err);
   }
-  db.get('items').remove({ id }).write();
-  res.status(204).end();
 });
 
 // Hapus banyak item sekaligus (checkbox terpilih di UI)
-app.post('/api/items/bulk-delete', (req, res) => {
-  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Number.isInteger) : [];
-  if (ids.length === 0) return res.status(400).json({ error: 'ids wajib berupa array angka' });
+app.post('/api/items/bulk-delete', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Number.isInteger) : [];
+    if (ids.length === 0) return res.status(400).json({ error: 'ids wajib berupa array angka' });
 
-  const idSet = new Set(ids);
-  const toDelete = db.get('items').filter((item) => idSet.has(item.id)).value();
-  for (const item of toDelete) {
-    deleteUploadedImage(item.gambar);
-    deleteUploadedImage(item.gambarThumb);
+    const deleted = await db.deleteItemsByIds(ids);
+    for (const item of deleted) {
+      await deleteImageFromBlob(item.gambar);
+      await deleteImageFromBlob(item.gambarThumb);
+    }
+    res.json({ deleted: deleted.length });
+  } catch (err) {
+    next(err);
   }
-
-  db.get('items').remove((item) => idSet.has(item.id)).write();
-  res.json({ deleted: toDelete.length });
 });
 
 // Hapus SELURUH master data (tombol "Hapus Semua Data")
-app.delete('/api/items', (req, res) => {
-  const allItems = db.get('items').value();
-  for (const item of allItems) {
-    deleteUploadedImage(item.gambar);
-    deleteUploadedImage(item.gambarThumb);
+app.delete('/api/items', async (req, res, next) => {
+  try {
+    const deleted = await db.deleteAllItems();
+    for (const item of deleted) {
+      await deleteImageFromBlob(item.gambar);
+      await deleteImageFromBlob(item.gambarThumb);
+    }
+    res.json({ deleted: deleted.length });
+  } catch (err) {
+    next(err);
   }
-
-  db.set('items', []).write();
-  db.set('nextId', 1).write();
-  res.json({ deleted: allItems.length });
 });
 
 // Concurrency untuk auto-fetch gambar INAPROC saat import - configurable lewat env
@@ -309,22 +251,53 @@ app.delete('/api/items', (req, res) => {
 // toleransi rate-limit server INAPROC).
 const INAPROC_CONCURRENCY = Number(process.env.INAPROC_CONCURRENCY) || 16;
 
-// Job auto-fetch gambar INAPROC berjalan di background (tidak nge-block response
-// import) - progress-nya dipantau lewat polling GET /api/import-progress/:jobId.
-// Disimpan in-memory saja (cukup untuk 1 proses server, hilang kalau server restart).
-const importJobs = new Map();
-const IMPORT_JOB_TTL_MS = 10 * 60 * 1000; // job lama dibuang dari memori setelah 10 menit
+// Jumlah item yang diproses per panggilan GET /api/import-progress - job auto-fetch
+// gambar INAPROC TIDAK jalan sebagai background process (fungsi serverless Vercel
+// dibekukan begitu response dikirim), melainkan dicicil: setiap polling dari frontend
+// (tiap ~1 detik, lihat pollImportProgress() di public/app.js) juga memproses satu
+// batch berikutnya, sampai semua item selesai. State job disimpan di tabel
+// import_jobs (lib/db.js), bukan memori proses, supaya konsisten walau tiap request
+// bisa kena instance serverless yang berbeda.
+const IMPORT_BATCH_SIZE = Number(process.env.IMPORT_BATCH_SIZE) || 8;
 
-app.get('/api/import-progress/:jobId', (req, res) => {
-  const job = importJobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'Job tidak ditemukan (mungkin sudah kedaluwarsa)' });
-  res.json({
-    total: job.total,
-    done: job.done,
-    gambarBerhasil: job.gambarBerhasil,
-    gambarGagal: job.gambarGagal,
-    completed: job.completed,
-  });
+app.get('/api/import-progress/:jobId', async (req, res, next) => {
+  try {
+    const { jobId } = req.params;
+    const job = await db.getImportJob(jobId);
+    if (!job) return res.status(404).json({ error: 'Job tidak ditemukan (mungkin sudah kedaluwarsa)' });
+
+    if (job.completed) {
+      return res.json(job);
+    }
+
+    const batch = await db.getPendingImportItems(jobId, IMPORT_BATCH_SIZE);
+    if (batch.length === 0) {
+      // Tidak ada sisa item pending tapi job belum ditandai completed (kondisi
+      // tepi, mis. batch sebelumnya crash) - tandai selesai sekarang.
+      const finalStatus = await db.advanceImportJob(jobId, { batchDone: 0, gambarBerhasil: 0, gambarGagal: [] });
+      return res.json(finalStatus);
+    }
+
+    let gambarBerhasil = 0;
+    const gambarGagal = [];
+
+    await runWithConcurrency(batch, Math.min(INAPROC_CONCURRENCY, batch.length), async (item) => {
+      const result = await fetchProductImage(item.link);
+      if (result) {
+        const uploaded = await uploadImageToBlob(result.buffer, result.ext, result.mimetype);
+        await db.saveItemFetchResult(item.id, uploaded);
+        gambarBerhasil++;
+      } else {
+        await db.saveItemFetchResult(item.id, null);
+        gambarGagal.push({ namaItem: item.namaItem, alasan: 'Gambar tidak ditemukan / link tidak bisa diakses' });
+      }
+    });
+
+    const status = await db.advanceImportJob(jobId, { batchDone: batch.length, gambarBerhasil, gambarGagal });
+    res.json(status);
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Import massal master data dari file Excel/CSV/PDF (kolom: nama item, tipe, merk, gambar)
@@ -374,49 +347,23 @@ app.post('/api/items/import', docUpload.single('file'), async (req, res, next) =
         .filter((item) => item.namaItem);
     }
 
-    let nextId = db.get('nextId').value();
-    const imported = parsedItems.map((item) => ({ id: nextId++, ...item }));
-
-    db.get('items').push(...imported).write();
-    db.set('nextId', nextId).write();
-
     // Ambil gambar otomatis dari kolom LINK (INAPROC) kalau diminta lewat checkbox di UI.
     const autoFetchImage = req.body?.autoFetchImage === 'true';
-    const itemsNeedingFetch = autoFetchImage
-      ? imported.filter((item) => !item.gambar && item.link)
-      : [];
+    const willNeedFetch = autoFetchImage && parsedItems.some((item) => !item.gambar && item.link);
+    const jobId = willNeedFetch ? crypto.randomUUID() : null;
 
-    if (itemsNeedingFetch.length === 0) {
+    const imported = await db.insertItemsBulk(parsedItems, jobId);
+
+    if (!jobId) {
       return res.status(201).json({ imported: imported.length, items: imported, gambarBerhasil: 0, gambarGagal: [] });
     }
 
-    // Response dibalas SEGERA (tidak menunggu ribuan fetch gambar selesai) - progress
-    // dipantau frontend lewat polling jobId di bawah.
-    const jobId = crypto.randomUUID();
-    const job = { total: itemsNeedingFetch.length, done: 0, gambarBerhasil: 0, gambarGagal: [], completed: false };
-    importJobs.set(jobId, job);
+    const totalPending = parsedItems.filter((item) => !item.gambar && item.link).length;
+    await db.createImportJob(jobId, totalPending);
 
+    // Batch pertama TIDAK diproses di sini (respons harus balik cepat) - polling
+    // pertama dari frontend (langsung setelah respons ini) yang memproses batch 1.
     res.status(201).json({ imported: imported.length, items: imported, jobId });
-
-    runWithConcurrency(itemsNeedingFetch, INAPROC_CONCURRENCY, async (item) => {
-      const result = await fetchProductImage(item.link);
-      if (result) {
-        const saved = await saveImageBuffer(result.buffer, result.ext);
-        item.gambar = saved.gambar;
-        item.gambarThumb = saved.gambarThumb;
-        job.gambarBerhasil++;
-      } else {
-        job.gambarGagal.push({ namaItem: item.namaItem, alasan: 'Gambar tidak ditemukan / link tidak bisa diakses' });
-      }
-      job.done++;
-      if (job.done % 10 === 0) db.write(); // persis berkala, bukan tiap item, supaya tidak terlalu sering fsync
-    })
-      .then(() => db.write())
-      .catch(() => {})
-      .finally(() => {
-        job.completed = true;
-        setTimeout(() => importJobs.delete(jobId), IMPORT_JOB_TTL_MS);
-      });
   } catch (err) {
     next(err);
   }
@@ -445,7 +392,7 @@ app.post('/api/match/run', docUpload.single('file'), async (req, res, next) => {
     }
 
     const { rows } = await readTabularBuffer(req.file.buffer, req.file.originalname);
-    const masterItems = db.get('items').value();
+    const masterItems = await db.getAllItems();
 
     const results = rows
       .map((row) => {
@@ -474,7 +421,7 @@ app.post('/api/export', async (req, res, next) => {
       Tipe: sanitizeField(r.tipe),
       Merk: sanitizeField(r.merk),
       'Skor Kemiripan': typeof r.score === 'number' ? r.score : '',
-      _imageAbsPath: resolveUploadedImagePath(r.gambar),
+      _imageUrl: /^https?:\/\//i.test(r.gambar || '') ? r.gambar : undefined,
     }));
 
     const buffer = await writeExcelBuffer(exportRows);
@@ -496,7 +443,14 @@ app.use((err, req, res, next) => {
   next();
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Item Matcher jalan di http://localhost:${PORT}`);
-});
+// app.listen() hanya dipanggil saat server.js dijalankan langsung (mis. `npm start`
+// untuk dev lokal) - di Vercel, api/index.js require() app ini sebagai handler
+// serverless, tanpa listen ke port.
+if (require.main === module) {
+  const PORT = process.env.PORT || 3999;
+  app.listen(PORT, () => {
+    console.log(`Item Matcher jalan di http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
