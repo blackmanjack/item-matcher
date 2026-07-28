@@ -59,7 +59,10 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
 
 // ---------- Master Barang ----------
 let itemsCache = [];
+let visibleItems = [];
 const selectedIds = new Set();
+const columnFilters = { namaItem: '', tipe: '', merk: '', link: '' };
+const sortState = { key: null, dir: 'asc' };
 
 async function loadItems() {
   const res = await fetch('/api/items');
@@ -68,24 +71,87 @@ async function loadItems() {
   renderItemsTable();
 }
 
+function getVisibleItems() {
+  let list = itemsCache;
+
+  const activeFilters = Object.entries(columnFilters).filter(([, v]) => v.trim());
+  if (activeFilters.length) {
+    list = list.filter((item) =>
+      activeFilters.every(([key, value]) => String(item[key] || '').toLowerCase().includes(value.trim().toLowerCase()))
+    );
+  }
+
+  if (sortState.key) {
+    const dir = sortState.dir === 'asc' ? 1 : -1;
+    list = [...list].sort((a, b) =>
+      String(a[sortState.key] || '').localeCompare(String(b[sortState.key] || ''), 'id', { sensitivity: 'base' }) * dir
+    );
+  }
+
+  return list;
+}
+
+function updateSortIndicators() {
+  document.querySelectorAll('#table-items th.sortable').forEach((th) => {
+    const indicator = th.querySelector('.sort-indicator');
+    if (th.dataset.sortKey === sortState.key) {
+      indicator.textContent = sortState.dir === 'asc' ? '▲' : '▼';
+    } else {
+      indicator.textContent = '';
+    }
+  });
+}
+
+document.querySelectorAll('#table-items th.sortable').forEach((th) => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.sortKey;
+    if (sortState.key === key) {
+      sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      sortState.key = key;
+      sortState.dir = 'asc';
+    }
+    renderItemsTable();
+  });
+});
+
+let filterDebounceTimer = null;
+document.querySelectorAll('.col-filter').forEach((input) => {
+  input.addEventListener('input', () => {
+    columnFilters[input.dataset.filterKey] = input.value;
+    clearTimeout(filterDebounceTimer);
+    filterDebounceTimer = setTimeout(renderItemsTable, 150);
+  });
+});
+
 function renderItemsTable() {
   const tbody = document.querySelector('#table-items tbody');
   tbody.innerHTML = '';
 
+  visibleItems = getVisibleItems();
+  updateSortIndicators();
+
   document.getElementById('item-count').textContent = itemsCache.length
-    ? `(${itemsCache.length})`
+    ? visibleItems.length === itemsCache.length
+      ? `(${itemsCache.length})`
+      : `(${visibleItems.length} dari ${itemsCache.length})`
     : '';
   document.getElementById('empty-state').style.display = itemsCache.length ? 'none' : 'block';
   document.getElementById('table-items').style.display = itemsCache.length ? 'table' : 'none';
 
-  for (const item of itemsCache) {
+  const fragment = document.createDocumentFragment();
+  for (const item of visibleItems) {
     const tr = document.createElement('tr');
     const linkHtml = isSafeHttpUrl(item.link)
       ? `<a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer">Lihat di INAPROC ↗</a>`
       : '';
+    // Thumbnail (kecil, cepat load) dipakai untuk list; gambar asli (data-full)
+    // dipakai saat user klik untuk lihat ukuran penuh. loading="lazy" supaya
+    // browser hanya fetch gambar yang benar-benar masuk viewport.
+    const thumbSrc = item.gambarThumb || item.gambar;
     tr.innerHTML = `
       <td><input type="checkbox" class="row-checkbox" data-id="${item.id}" ${selectedIds.has(item.id) ? 'checked' : ''} /></td>
-      <td>${item.gambar ? `<img src="${escapeHtml(item.gambar)}" alt="" class="thumb thumb-clickable" data-full="${escapeHtml(item.gambar)}" />` : ''}</td>
+      <td>${item.gambar ? `<img src="${escapeHtml(thumbSrc)}" alt="" loading="lazy" class="thumb thumb-clickable" data-full="${escapeHtml(item.gambar)}" />` : ''}</td>
       <td>${escapeHtml(item.namaItem)}</td>
       <td>${escapeHtml(item.tipe)}</td>
       <td>${escapeHtml(item.merk)}</td>
@@ -95,8 +161,9 @@ function renderItemsTable() {
         <button class="btn btn-danger-outline btn-sm delete-btn" data-id="${item.id}">Hapus</button>
       </td>
     `;
-    tbody.appendChild(tr);
+    fragment.appendChild(tr);
   }
+  tbody.appendChild(fragment);
 
   tbody.querySelectorAll('.delete-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -160,15 +227,19 @@ function updateSelectionUI() {
   document.getElementById('selected-count').textContent = count;
   document.getElementById('btn-delete-selected').disabled = count === 0;
 
+  const visibleSelectedCount = visibleItems.filter((item) => selectedIds.has(item.id)).length;
   const selectAll = document.getElementById('checkbox-select-all');
-  selectAll.checked = itemsCache.length > 0 && count === itemsCache.length;
-  selectAll.indeterminate = count > 0 && count < itemsCache.length;
+  selectAll.checked = visibleItems.length > 0 && visibleSelectedCount === visibleItems.length;
+  selectAll.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < visibleItems.length;
 }
 
+// Centang "pilih semua" hanya berlaku untuk baris yang sedang tampil (setelah filter),
+// bukan seluruh data - supaya sesuai ekspektasi saat sedang memfilter.
 document.getElementById('checkbox-select-all').addEventListener('change', (e) => {
-  selectedIds.clear();
   if (e.target.checked) {
-    itemsCache.forEach((item) => selectedIds.add(item.id));
+    visibleItems.forEach((item) => selectedIds.add(item.id));
+  } else {
+    visibleItems.forEach((item) => selectedIds.delete(item.id));
   }
   renderItemsTable();
 });
@@ -265,18 +336,25 @@ document.getElementById('form-import').addEventListener('submit', async (e) => {
 
   const btnImport = document.getElementById('btn-submit-import');
   const statusEl = document.getElementById('import-status');
+  const progressWrap = document.getElementById('import-progress');
   btnImport.disabled = true;
   btnImport.textContent = autoFetchImage ? 'Mengambil gambar...' : 'Mengimport...';
   statusEl.classList.remove('error');
   statusEl.textContent = '';
+  progressWrap.style.display = 'none';
 
   try {
     const res = await fetch('/api/items/import', { method: 'POST', body: formData });
     if (res.ok) {
       const data = await res.json();
-      renderImportSummary(data);
       fileInput.value = '';
       loadItems();
+
+      if (data.jobId) {
+        await pollImportProgress(data.jobId, data.imported);
+      } else {
+        renderImportSummary({ imported: data.imported, gambarBerhasil: data.gambarBerhasil, gambarGagal: data.gambarGagal });
+      }
     } else {
       const err = await res.json();
       statusEl.classList.add('error');
@@ -287,6 +365,45 @@ document.getElementById('form-import').addEventListener('submit', async (e) => {
     btnImport.textContent = 'Import';
   }
 });
+
+// Poll GET /api/import-progress/:jobId sampai selesai, update progress bar,
+// dan refresh daftar item secara berkala supaya gambar yang baru selesai
+// di-fetch langsung terlihat tanpa menunggu seluruh batch selesai.
+async function pollImportProgress(jobId, importedCount) {
+  const progressWrap = document.getElementById('import-progress');
+  const fill = document.getElementById('import-progress-fill');
+  const text = document.getElementById('import-progress-text');
+  progressWrap.style.display = 'block';
+
+  let lastDone = -1;
+  for (;;) {
+    let job;
+    try {
+      const res = await fetch(`/api/import-progress/${jobId}`);
+      if (!res.ok) break;
+      job = await res.json();
+    } catch {
+      break;
+    }
+
+    const pct = job.total ? Math.round((job.done / job.total) * 100) : 100;
+    fill.style.width = `${pct}%`;
+    text.textContent = `Mengambil gambar: ${job.done}/${job.total} (berhasil: ${job.gambarBerhasil}, gagal: ${job.gambarGagal.length})`;
+
+    if (job.done !== lastDone) {
+      lastDone = job.done;
+      loadItems(); // refresh thumbnail yang baru selesai di-fetch
+    }
+
+    if (job.completed) {
+      renderImportSummary({ imported: importedCount, gambarBerhasil: job.gambarBerhasil, gambarGagal: job.gambarGagal });
+      progressWrap.style.display = 'none';
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
 
 function renderImportSummary(data) {
   const statusEl = document.getElementById('import-status');

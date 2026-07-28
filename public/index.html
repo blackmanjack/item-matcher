@@ -77,6 +77,10 @@
           </label>
           <button type="submit" class="btn btn-secondary" id="btn-submit-import">Import</button>
         </form>
+        <div id="import-progress" class="import-progress" style="display:none">
+          <div class="progress-bar"><div id="import-progress-fill" class="progress-bar-fill"></div></div>
+          <p id="import-progress-text" class="status"></p>
+        </div>
         <p id="import-status" class="status"></p>
       </div>
 
@@ -94,10 +98,19 @@
               <tr>
                 <th class="col-checkbox"><input type="checkbox" id="checkbox-select-all" /></th>
                 <th class="col-image">Gambar</th>
-                <th>Nama Item</th>
-                <th>Tipe</th>
-                <th>Merk</th>
-                <th>Link</th>
+                <th class="sortable" data-sort-key="namaItem">Nama Item<span class="sort-indicator"></span></th>
+                <th class="sortable" data-sort-key="tipe">Tipe<span class="sort-indicator"></span></th>
+                <th class="sortable" data-sort-key="merk">Merk<span class="sort-indicator"></span></th>
+                <th class="sortable" data-sort-key="link">Link<span class="sort-indicator"></span></th>
+                <th class="col-actions"></th>
+              </tr>
+              <tr class="filter-row">
+                <th class="col-checkbox"></th>
+                <th class="col-image"></th>
+                <th><input type="text" class="col-filter" data-filter-key="namaItem" placeholder="Filter nama item..." /></th>
+                <th><input type="text" class="col-filter" data-filter-key="tipe" placeholder="Filter tipe..." /></th>
+                <th><input type="text" class="col-filter" data-filter-key="merk" placeholder="Filter merk..." /></th>
+                <th><input type="text" class="col-filter" data-filter-key="link" placeholder="Filter link..." /></th>
                 <th class="col-actions"></th>
               </tr>
             </thead>

@@ -246,6 +246,20 @@ body {
 
 .status { color: var(--success); font-size: 13.5px; margin: 10px 0 0; }
 .status.error { color: var(--danger); }
+
+.import-progress { margin-top: 10px; }
+.progress-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--thumb-bg, #e5e7eb);
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--success);
+  transition: width 0.2s ease;
+}
 .fail-list {
   margin: 8px 0 0;
   padding-left: 18px;
@@ -330,6 +344,39 @@ th {
 }
 tbody tr:hover { background: var(--surface-alt); }
 .col-checkbox, .col-image, .col-actions { width: 1%; white-space: nowrap; }
+
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+th.sortable:hover { color: var(--text); }
+.sort-indicator {
+  display: inline-block;
+  width: 12px;
+  margin-left: 2px;
+  font-size: 10px;
+}
+.filter-row th {
+  background: var(--surface);
+  padding: 6px 8px;
+}
+.col-filter {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  font-size: 12.5px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+.col-filter:focus {
+  outline: none;
+  border-color: var(--accent, var(--success));
+}
 
 input[type="checkbox"] {
   width: 16px;

@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
 const multer = require('multer');
+const sharp = require('sharp');
 const low = require('lowdb');
 const FileSync = require('lowdb/adapters/FileSync');
 
@@ -122,6 +123,25 @@ function deleteUploadedImage(gambarPath) {
   fs.unlink(fullPath, () => {}); // best-effort, abaikan error kalau file tidak ada
 }
 
+const THUMB_MAX_SIZE = 200;
+const THUMB_QUALITY = 75;
+
+// Generate thumbnail webp kecil dari gambar sumber (buffer atau path di disk).
+// Return path relatif "/uploads/xxx_thumb.webp", atau null kalau gagal (list akan
+// fallback ke gambar asli di frontend).
+async function generateThumbnail(source, baseFilename) {
+  try {
+    const thumbFilename = `${baseFilename}_thumb.webp`;
+    await sharp(source)
+      .resize({ width: THUMB_MAX_SIZE, height: THUMB_MAX_SIZE, fit: 'inside', withoutEnlargement: true })
+      .webp({ quality: THUMB_QUALITY })
+      .toFile(path.join(UPLOADS_DIR, thumbFilename));
+    return `/uploads/${thumbFilename}`;
+  } catch {
+    return null;
+  }
+}
+
 // Resolve path gambar relatif ("/uploads/xxx.ext") -> path absolut di disk, khusus
 // untuk dibaca (export Excel). basename() mencegah path traversal, sama seperti
 // deleteUploadedImage di atas.
@@ -132,12 +152,15 @@ function resolveUploadedImagePath(gambarPath) {
   return fs.existsSync(fullPath) ? fullPath : undefined;
 }
 
-// Simpan buffer gambar ke public/uploads dengan nama acak (dipakai baik untuk upload
-// manual maupun hasil auto-fetch dari link INAPROC) -> return path relatif "/uploads/xxx.ext".
-function saveImageBuffer(buffer, ext) {
-  const filename = `${crypto.randomUUID()}${ext}`;
+// Simpan buffer gambar ke public/uploads dengan nama acak (dipakai untuk hasil
+// auto-fetch dari link INAPROC), sekaligus generate thumbnail kecil untuk tampilan
+// list -> return { gambar, gambarThumb } (path relatif).
+async function saveImageBuffer(buffer, ext) {
+  const id = crypto.randomUUID();
+  const filename = `${id}${ext}`;
   fs.writeFileSync(path.join(UPLOADS_DIR, filename), buffer);
-  return `/uploads/${filename}`;
+  const gambarThumb = await generateThumbnail(buffer, id);
+  return { gambar: `/uploads/${filename}`, gambarThumb: gambarThumb || `/uploads/${filename}` };
 }
 
 function sanitizeField(value) {
@@ -155,6 +178,9 @@ async function readTabularBuffer(buffer, originalname) {
 const app = express();
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
+// Nama file di /uploads selalu UUID unik per gambar (tidak pernah dipakai ulang
+// untuk konten berbeda) - aman di-cache selamanya oleh browser.
+app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '1y', immutable: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Endpoint status lisensi harus terdaftar SEBELUM middleware requireLicense supaya
@@ -171,61 +197,80 @@ app.get('/api/items', (req, res) => {
   res.json(db.get('items').value());
 });
 
-app.post('/api/items', imageUpload.single('gambarFile'), (req, res) => {
-  const namaItem = sanitizeField(req.body?.namaItem);
-  if (!namaItem) {
-    if (req.file) deleteUploadedImage(`/uploads/${req.file.filename}`);
-    return res.status(400).json({ error: 'namaItem wajib diisi' });
-  }
+app.post('/api/items', imageUpload.single('gambarFile'), async (req, res, next) => {
+  try {
+    const namaItem = sanitizeField(req.body?.namaItem);
+    if (!namaItem) {
+      if (req.file) deleteUploadedImage(`/uploads/${req.file.filename}`);
+      return res.status(400).json({ error: 'namaItem wajib diisi' });
+    }
 
-  const id = db.get('nextId').value();
-  const item = {
-    id,
-    namaItem,
-    tipe: sanitizeField(req.body?.tipe),
-    merk: sanitizeField(req.body?.merk),
-    link: sanitizeField(req.body?.link),
-    gambar: req.file ? `/uploads/${req.file.filename}` : '',
-  };
-  db.get('items').push(item).write();
-  db.set('nextId', id + 1).write();
-  res.status(201).json(item);
+    const id = db.get('nextId').value();
+    let gambarThumb = '';
+    if (req.file) {
+      gambarThumb = (await generateThumbnail(req.file.path, path.parse(req.file.filename).name)) || '';
+    }
+    const item = {
+      id,
+      namaItem,
+      tipe: sanitizeField(req.body?.tipe),
+      merk: sanitizeField(req.body?.merk),
+      link: sanitizeField(req.body?.link),
+      gambar: req.file ? `/uploads/${req.file.filename}` : '',
+      gambarThumb: gambarThumb || (req.file ? `/uploads/${req.file.filename}` : ''),
+    };
+    db.get('items').push(item).write();
+    db.set('nextId', id + 1).write();
+    res.status(201).json(item);
+  } catch (err) {
+    next(err);
+  }
 });
 
-app.put('/api/items/:id', imageUpload.single('gambarFile'), (req, res) => {
-  const id = Number(req.params.id);
-  const existing = db.get('items').find({ id }).value();
-  if (!existing) {
-    if (req.file) deleteUploadedImage(`/uploads/${req.file.filename}`);
-    return res.status(404).json({ error: 'Item tidak ditemukan' });
+app.put('/api/items/:id', imageUpload.single('gambarFile'), async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const existing = db.get('items').find({ id }).value();
+    if (!existing) {
+      if (req.file) deleteUploadedImage(`/uploads/${req.file.filename}`);
+      return res.status(404).json({ error: 'Item tidak ditemukan' });
+    }
+
+    const namaItem = sanitizeField(req.body?.namaItem);
+    if (!namaItem) {
+      if (req.file) deleteUploadedImage(`/uploads/${req.file.filename}`);
+      return res.status(400).json({ error: 'namaItem wajib diisi' });
+    }
+
+    const updates = {
+      namaItem,
+      tipe: sanitizeField(req.body?.tipe),
+      merk: sanitizeField(req.body?.merk),
+      link: sanitizeField(req.body?.link),
+    };
+
+    if (req.file) {
+      deleteUploadedImage(existing.gambar);
+      deleteUploadedImage(existing.gambarThumb);
+      const gambarThumb = await generateThumbnail(req.file.path, path.parse(req.file.filename).name);
+      updates.gambar = `/uploads/${req.file.filename}`;
+      updates.gambarThumb = gambarThumb || updates.gambar;
+    }
+
+    db.get('items').find({ id }).assign(updates).write();
+    res.json(db.get('items').find({ id }).value());
+  } catch (err) {
+    next(err);
   }
-
-  const namaItem = sanitizeField(req.body?.namaItem);
-  if (!namaItem) {
-    if (req.file) deleteUploadedImage(`/uploads/${req.file.filename}`);
-    return res.status(400).json({ error: 'namaItem wajib diisi' });
-  }
-
-  const updates = {
-    namaItem,
-    tipe: sanitizeField(req.body?.tipe),
-    merk: sanitizeField(req.body?.merk),
-    link: sanitizeField(req.body?.link),
-  };
-
-  if (req.file) {
-    deleteUploadedImage(existing.gambar);
-    updates.gambar = `/uploads/${req.file.filename}`;
-  }
-
-  db.get('items').find({ id }).assign(updates).write();
-  res.json(db.get('items').find({ id }).value());
 });
 
 app.delete('/api/items/:id', (req, res) => {
   const id = Number(req.params.id);
   const existing = db.get('items').find({ id }).value();
-  if (existing) deleteUploadedImage(existing.gambar);
+  if (existing) {
+    deleteUploadedImage(existing.gambar);
+    deleteUploadedImage(existing.gambarThumb);
+  }
   db.get('items').remove({ id }).write();
   res.status(204).end();
 });
@@ -237,7 +282,10 @@ app.post('/api/items/bulk-delete', (req, res) => {
 
   const idSet = new Set(ids);
   const toDelete = db.get('items').filter((item) => idSet.has(item.id)).value();
-  for (const item of toDelete) deleteUploadedImage(item.gambar);
+  for (const item of toDelete) {
+    deleteUploadedImage(item.gambar);
+    deleteUploadedImage(item.gambarThumb);
+  }
 
   db.get('items').remove((item) => idSet.has(item.id)).write();
   res.json({ deleted: toDelete.length });
@@ -246,11 +294,37 @@ app.post('/api/items/bulk-delete', (req, res) => {
 // Hapus SELURUH master data (tombol "Hapus Semua Data")
 app.delete('/api/items', (req, res) => {
   const allItems = db.get('items').value();
-  for (const item of allItems) deleteUploadedImage(item.gambar);
+  for (const item of allItems) {
+    deleteUploadedImage(item.gambar);
+    deleteUploadedImage(item.gambarThumb);
+  }
 
   db.set('items', []).write();
   db.set('nextId', 1).write();
   res.json({ deleted: allItems.length });
+});
+
+// Concurrency untuk auto-fetch gambar INAPROC saat import - configurable lewat env
+// var INAPROC_CONCURRENCY kalau perlu disesuaikan (mis. dinaikkan/diturunkan sesuai
+// toleransi rate-limit server INAPROC).
+const INAPROC_CONCURRENCY = Number(process.env.INAPROC_CONCURRENCY) || 16;
+
+// Job auto-fetch gambar INAPROC berjalan di background (tidak nge-block response
+// import) - progress-nya dipantau lewat polling GET /api/import-progress/:jobId.
+// Disimpan in-memory saja (cukup untuk 1 proses server, hilang kalau server restart).
+const importJobs = new Map();
+const IMPORT_JOB_TTL_MS = 10 * 60 * 1000; // job lama dibuang dari memori setelah 10 menit
+
+app.get('/api/import-progress/:jobId', (req, res) => {
+  const job = importJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job tidak ditemukan (mungkin sudah kedaluwarsa)' });
+  res.json({
+    total: job.total,
+    done: job.done,
+    gambarBerhasil: job.gambarBerhasil,
+    gambarGagal: job.gambarGagal,
+    completed: job.completed,
+  });
 });
 
 // Import massal master data dari file Excel/CSV/PDF (kolom: nama item, tipe, merk, gambar)
@@ -300,35 +374,49 @@ app.post('/api/items/import', docUpload.single('file'), async (req, res, next) =
         .filter((item) => item.namaItem);
     }
 
-    // Ambil gambar otomatis dari kolom LINK (INAPROC) kalau diminta lewat checkbox di UI.
-    const autoFetchImage = req.body?.autoFetchImage === 'true';
-    let gambarBerhasil = 0;
-    const gambarGagal = [];
-
-    if (autoFetchImage) {
-      await runWithConcurrency(parsedItems, 4, async (item) => {
-        if (item.gambar || !item.link) return; // sudah ada gambar, atau tidak ada link
-        const result = await fetchProductImage(item.link);
-        if (result) {
-          item.gambar = saveImageBuffer(result.buffer, result.ext);
-          gambarBerhasil++;
-        } else {
-          gambarGagal.push({ namaItem: item.namaItem, alasan: 'Gambar tidak ditemukan / link tidak bisa diakses' });
-        }
-      });
-    }
-
     let nextId = db.get('nextId').value();
     const imported = parsedItems.map((item) => ({ id: nextId++, ...item }));
 
     db.get('items').push(...imported).write();
     db.set('nextId', nextId).write();
-    res.status(201).json({
-      imported: imported.length,
-      items: imported,
-      gambarBerhasil,
-      gambarGagal,
-    });
+
+    // Ambil gambar otomatis dari kolom LINK (INAPROC) kalau diminta lewat checkbox di UI.
+    const autoFetchImage = req.body?.autoFetchImage === 'true';
+    const itemsNeedingFetch = autoFetchImage
+      ? imported.filter((item) => !item.gambar && item.link)
+      : [];
+
+    if (itemsNeedingFetch.length === 0) {
+      return res.status(201).json({ imported: imported.length, items: imported, gambarBerhasil: 0, gambarGagal: [] });
+    }
+
+    // Response dibalas SEGERA (tidak menunggu ribuan fetch gambar selesai) - progress
+    // dipantau frontend lewat polling jobId di bawah.
+    const jobId = crypto.randomUUID();
+    const job = { total: itemsNeedingFetch.length, done: 0, gambarBerhasil: 0, gambarGagal: [], completed: false };
+    importJobs.set(jobId, job);
+
+    res.status(201).json({ imported: imported.length, items: imported, jobId });
+
+    runWithConcurrency(itemsNeedingFetch, INAPROC_CONCURRENCY, async (item) => {
+      const result = await fetchProductImage(item.link);
+      if (result) {
+        const saved = await saveImageBuffer(result.buffer, result.ext);
+        item.gambar = saved.gambar;
+        item.gambarThumb = saved.gambarThumb;
+        job.gambarBerhasil++;
+      } else {
+        job.gambarGagal.push({ namaItem: item.namaItem, alasan: 'Gambar tidak ditemukan / link tidak bisa diakses' });
+      }
+      job.done++;
+      if (job.done % 10 === 0) db.write(); // persis berkala, bukan tiap item, supaya tidak terlalu sering fsync
+    })
+      .then(() => db.write())
+      .catch(() => {})
+      .finally(() => {
+        job.completed = true;
+        setTimeout(() => importJobs.delete(jobId), IMPORT_JOB_TTL_MS);
+      });
   } catch (err) {
     next(err);
   }
